@@ -1,14 +1,14 @@
 const express = require('express');
-const router = express.Router();
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const router  = express.Router();
+const bcrypt  = require('bcryptjs');
+const jwt     = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const User = require('../models/User');
+const User    = require('../models/User');
 const { generateOTP, sendOTP } = require('../utils/email');
 
 // ── Rate limiters ──
 const otpLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
+  windowMs: 15 * 60 * 1000,
   max: 5,
   message: { message: 'Too many OTP requests. Try again in 15 minutes.' },
 });
@@ -18,16 +18,11 @@ const loginLimiter = rateLimit({
   message: { message: 'Too many login attempts. Try again in 15 minutes.' },
 });
 
-// ── Helper ──
 function otpExpiry() {
   return new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 }
 
-// ═══════════════════════════════
-//  POST /api/auth/signup
-//  Body: { username, email, password }
-//  → sends verify OTP to email
-// ═══════════════════════════════
+// ── POST /api/auth/signup ──
 router.post('/signup', otpLimiter, async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -39,9 +34,9 @@ router.post('/signup', otpLimiter, async (req, res) => {
     if (!password || password.length < 6)
       return res.status(400).json({ message: 'Password must be 6+ characters' });
 
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
-    if (existingUser) {
-      if (existingUser.username === username)
+    const existing = await User.findOne({ $or: [{ email: email.toLowerCase() }, { username }] });
+    if (existing) {
+      if (existing.username === username)
         return res.status(400).json({ message: 'Username already taken' });
       return res.status(400).json({ message: 'Email already registered' });
     }
@@ -51,18 +46,17 @@ router.post('/signup', otpLimiter, async (req, res) => {
 
     const user = new User({
       username,
-      email,
+      email: email.toLowerCase(),
       password: hashedPassword,
       isVerified: false,
       otp: { code: otp, expiresAt: otpExpiry(), purpose: 'verify' },
     });
     await user.save();
-
-    await sendOTP(email, otp, 'verify');
+    await sendOTP(user.email, otp, 'verify');
 
     res.status(201).json({
       message: 'OTP sent to your email. Verify to activate your account.',
-      email,
+      email: user.email,
     });
   } catch (err) {
     console.error('Signup error:', err);
@@ -70,15 +64,11 @@ router.post('/signup', otpLimiter, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════
-//  POST /api/auth/verify-signup
-//  Body: { email, otp }
-//  → marks account verified, returns JWT
-// ═══════════════════════════════
+// ── POST /api/auth/verify-signup ──
 router.post('/verify-signup', async (req, res) => {
   try {
     const { email, otp } = req.body;
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) return res.status(400).json({ message: 'User not found' });
     if (user.otp.purpose !== 'verify')
@@ -109,11 +99,7 @@ router.post('/verify-signup', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════
-//  POST /api/auth/login
-//  Body: { emailOrUsername, password }
-//  → sends login OTP to email
-// ═══════════════════════════════
+// ── POST /api/auth/login ──
 router.post('/login', loginLimiter, async (req, res) => {
   try {
     const { emailOrUsername, password } = req.body;
@@ -121,20 +107,24 @@ router.post('/login', loginLimiter, async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
 
     const user = await User.findOne({
-      $or: [{ email: emailOrUsername.toLowerCase() }, { username: emailOrUsername }],
+      $or: [
+        { email: emailOrUsername.toLowerCase() },
+        { username: emailOrUsername },
+      ],
     });
 
-    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+    if (!user)
+      return res.status(400).json({ message: 'Invalid credentials' });
     if (!user.isVerified)
-      return res.status(400).json({ message: 'Account not verified. Please check your email.' });
+      return res.status(400).json({ message: 'Account not verified. Check your email.' });
 
     const match = await bcrypt.compare(password, user.password);
-    if (!match) return res.status(400).json({ message: 'Invalid credentials' });
+    if (!match)
+      return res.status(400).json({ message: 'Invalid credentials' });
 
     const otp = generateOTP();
     user.otp = { code: otp, expiresAt: otpExpiry(), purpose: 'login' };
     await user.save();
-
     await sendOTP(user.email, otp, 'login');
 
     res.json({
@@ -147,15 +137,11 @@ router.post('/login', loginLimiter, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════
-//  POST /api/auth/verify-login
-//  Body: { email, otp }
-//  → returns JWT
-// ═══════════════════════════════
+// ── POST /api/auth/verify-login ──
 router.post('/verify-login', async (req, res) => {
   try {
     const { email, otp } = req.body;
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) return res.status(400).json({ message: 'User not found' });
     if (user.otp.purpose !== 'login')
@@ -185,38 +171,29 @@ router.post('/verify-login', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════
-//  POST /api/auth/forgot-password
-//  Body: { email }
-//  → sends reset OTP
-// ═══════════════════════════════
+// ── POST /api/auth/forgot-password ──
 router.post('/forgot-password', otpLimiter, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required' });
 
     const user = await User.findOne({ email: email.toLowerCase() });
-    // Always respond OK to prevent email enumeration
+    // Always return same message to prevent email enumeration
     if (!user) return res.json({ message: 'If that email exists, an OTP has been sent.' });
 
     const otp = generateOTP();
     user.otp = { code: otp, expiresAt: otpExpiry(), purpose: 'reset' };
     await user.save();
-
     await sendOTP(user.email, otp, 'reset');
 
-    res.json({ message: 'Password reset OTP sent to your email.', email });
+    res.json({ message: 'Password reset OTP sent to your email.', email: user.email });
   } catch (err) {
     console.error('Forgot password error:', err);
     res.status(500).json({ message: 'Server error. Please try again.' });
   }
 });
 
-// ═══════════════════════════════
-//  POST /api/auth/reset-password
-//  Body: { email, otp, newPassword }
-//  → resets password, returns JWT
-// ═══════════════════════════════
+// ── POST /api/auth/reset-password ──
 router.post('/reset-password', async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
@@ -225,7 +202,7 @@ router.post('/reset-password', async (req, res) => {
     if (newPassword.length < 6)
       return res.status(400).json({ message: 'Password must be 6+ characters' });
 
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) return res.status(400).json({ message: 'User not found' });
     if (user.otp.purpose !== 'reset')
       return res.status(400).json({ message: 'No pending reset for this account' });
@@ -255,21 +232,21 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// ═══════════════════════════════
-//  POST /api/auth/resend-otp
-//  Body: { email, purpose }
-// ═══════════════════════════════
+// ── POST /api/auth/resend-otp ──
 router.post('/resend-otp', otpLimiter, async (req, res) => {
   try {
     const { email, purpose } = req.body;
-    const user = await User.findOne({ email });
+    if (!email || !purpose)
+      return res.status(400).json({ message: 'Email and purpose are required' });
+
+    const user = await User.findOne({ email: email.toLowerCase() });
     if (!user) return res.status(400).json({ message: 'User not found' });
 
     const otp = generateOTP();
     user.otp = { code: otp, expiresAt: otpExpiry(), purpose };
     await user.save();
+    await sendOTP(user.email, otp, purpose);
 
-    await sendOTP(email, otp, purpose);
     res.json({ message: 'New OTP sent to your email.' });
   } catch (err) {
     console.error('Resend OTP error:', err);
