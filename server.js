@@ -1,7 +1,7 @@
 require('dotenv').config();
-const express = require('express');
-const mongoose = require('mongoose');
-const cors = require('cors');
+const express   = require('express');
+const mongoose  = require('mongoose');
+const cors      = require('cors');
 const rateLimit = require('express-rate-limit');
 
 const authRoutes = require('./routes/auth');
@@ -9,7 +9,24 @@ const gameRoutes = require('./routes/game');
 
 const app = express();
 
-// ── CORS ──
+// ══════════════════════════════════════════════
+//  MONGOOSE CONNECTION CACHING
+//  Must be defined BEFORE it is used in middleware
+// ══════════════════════════════════════════════
+let isConnected = false;
+
+async function connectDB() {
+  if (isConnected) return;
+  await mongoose.connect(process.env.MONGODB_URI, {
+    bufferCommands: false,
+    serverSelectionTimeoutMS: 10000,
+    socketTimeoutMS: 45000,
+  });
+  isConnected = true;
+  console.log('MongoDB connected');
+}
+
+// ── 1. CORS ── (must be first)
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   'http://localhost:3000',
@@ -26,10 +43,10 @@ app.use(cors({
   credentials: true,
 }));
 
-// ── BODY PARSER ──
+// ── 2. BODY PARSER ──
 app.use(express.json());
 
-// ── GLOBAL RATE LIMIT ──
+// ── 3. GLOBAL RATE LIMIT ──
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -37,51 +54,7 @@ app.use(rateLimit({
   legacyHeaders: false,
 }));
 
-// ── ROUTES ──
-app.use('/api/auth', authRoutes);
-app.use('/api/game', gameRoutes);
-
-// ── HEALTH CHECK ──
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
-  });
-});
-
-// ── 404 ──
-app.use((req, res) => {
-  res.status(404).json({ message: 'Route not found' });
-});
-
-// ── GLOBAL ERROR HANDLER ──
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err.stack);
-  res.status(500).json({ message: 'Internal server error' });
-});
-
-// ══════════════════════════════════════════════
-//  MONGOOSE CONNECTION CACHING
-//  Critical for Vercel serverless — reuses the
-//  existing connection across warm invocations
-//  instead of opening a new one every request.
-// ══════════════════════════════════════════════
-let isConnected = false;
-
-async function connectDB() {
-  if (isConnected) return;
-  await mongoose.connect(process.env.MONGODB_URI, {
-    bufferCommands: false,
-    serverSelectionTimeoutMS: 10000,
-    socketTimeoutMS: 45000,
-  });
-  isConnected = true;
-  console.log('MongoDB connected');
-}
-
-// ── DB CONNECT MIDDLEWARE ──
-// Runs before every request; no-op after first successful connection
+// ── 4. DB CONNECT MIDDLEWARE ── (MUST come before routes)
 app.use(async (req, res, next) => {
   try {
     await connectDB();
@@ -92,10 +65,32 @@ app.use(async (req, res, next) => {
   }
 });
 
+// ── 5. HEALTH CHECK ──
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+  });
+});
+
+// ── 6. ROUTES ── (after DB middleware)
+app.use('/api/auth', authRoutes);
+app.use('/api/game', gameRoutes);
+
+// ── 7. 404 — catches anything not matched above ──
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found', path: req.originalUrl });
+});
+
+// ── 8. GLOBAL ERROR HANDLER ──
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.stack);
+  res.status(500).json({ message: 'Internal server error' });
+});
+
 // ══════════════════════════════════════════════
-//  VERCEL EXPORT  ← THE CRITICAL FIX
-//  Vercel calls this module as a handler.
-//  Never call app.listen() at the top level.
+//  VERCEL EXPORT — do NOT call app.listen() here
 // ══════════════════════════════════════════════
 module.exports = app;
 
